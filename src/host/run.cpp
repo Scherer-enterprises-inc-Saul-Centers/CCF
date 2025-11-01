@@ -36,7 +36,6 @@
 #include "load_monitor.h"
 #include "node_connections.h"
 #include "pal/quote_generation.h"
-#include "process_launcher.h"
 #include "rpc_connections.h"
 #include "sig_term.h"
 #include "snapshots/fetch.h"
@@ -480,7 +479,8 @@ namespace ccf
         config.command.service_certificate_file,
         latest_local_idx,
         config.command.join.fetch_snapshot_max_attempts,
-        config.command.join.fetch_snapshot_retry_interval.count_ms());
+        config.command.join.fetch_snapshot_retry_interval.count_ms(),
+        config.command.join.fetch_snapshot_max_size.count_bytes());
 
       if (latest_peer_snapshot.has_value())
       {
@@ -845,10 +845,6 @@ namespace ccf
     // Load startup snapshot if needed
     auto startup_snapshot = load_startup_snapshot(config, snapshots);
 
-    if (config.network.acme)
-    {
-      startup_config.network.acme = config.network.acme;
-    }
     // Used by GET /node/network/nodes/self to return rpc interfaces
     // prior to the KV being updated
     startup_config.network.rpc_interfaces = config.network.rpc_interfaces;
@@ -1095,10 +1091,6 @@ namespace ccf
     const oversized::FragmentReconstructor fragment_reconstructor(
       buffer_processor.get_dispatcher());
 
-    asynchost::ProcessLauncher process_launcher;
-    process_launcher.register_message_handlers(
-      buffer_processor.get_dispatcher());
-
     {
       EnclaveConfig enclave_config;
       enclave_config.to_enclave_buffer_start = to_enclave_def.data;
@@ -1120,8 +1112,6 @@ namespace ccf
         return inner_ret.value();
       }
     }
-
-    process_launcher.stop();
 
     constexpr size_t max_close_iterations = 1000;
     size_t close_iterations = max_close_iterations;

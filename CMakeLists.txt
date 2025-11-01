@@ -174,13 +174,6 @@ if(SAN)
   install(FILES ${CCF_DIR}/src/san_common.suppressions DESTINATION bin)
 endif()
 
-# Install getting_started scripts for VM creation and setup
-install(
-  DIRECTORY ${CCF_DIR}/getting_started/
-  DESTINATION getting_started
-  USE_SOURCE_PERMISSIONS
-)
-
 set(HTTP_PARSER_SOURCES
     ${CCF_3RD_PARTY_EXPORTED_DIR}/llhttp/api.c
     ${CCF_3RD_PARTY_EXPORTED_DIR}/llhttp/http.c
@@ -244,7 +237,6 @@ add_ccf_static_library(
        ${CCF_DIR}/src/js/extensions/ccf/gov.cpp
        ${CCF_DIR}/src/js/extensions/ccf/gov_effects.cpp
        ${CCF_DIR}/src/js/extensions/ccf/historical.cpp
-       ${CCF_DIR}/src/js/extensions/ccf/host.cpp
        ${CCF_DIR}/src/js/extensions/ccf/kv.cpp
        ${CCF_DIR}/src/js/extensions/ccf/network.cpp
        ${CCF_DIR}/src/js/extensions/ccf/node.cpp
@@ -287,9 +279,11 @@ add_ccf_static_library(
 # CCF task system library
 add_ccf_static_library(
   ccf_tasks
-  SRCS ${CCF_DIR}/src/tasks/task_system.cpp ${CCF_DIR}/src/tasks/job_board.cpp
+  SRCS ${CCF_DIR}/src/tasks/task_system.cpp
+       ${CCF_DIR}/src/tasks/job_board.cpp
        ${CCF_DIR}/src/tasks/ordered_tasks.cpp
        ${CCF_DIR}/src/tasks/fan_in_tasks.cpp
+       ${CCF_DIR}/src/tasks/thread_manager.cpp
 )
 
 # Common test args for Python scripts starting up CCF networks
@@ -572,6 +566,7 @@ if(BUILD_TESTS)
       ${CMAKE_CURRENT_SOURCE_DIR}/src/tasks/test/ordered_tasks.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/tasks/test/delayed_tasks.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/src/tasks/test/fan_in_tasks.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/src/tasks/test/tasks_api.cpp
     )
     target_link_libraries(task_system_test PRIVATE ccf_tasks)
 
@@ -938,14 +933,6 @@ if(BUILD_TESTS)
                     ${CMAKE_SOURCE_DIR}/tests
   )
 
-  add_e2e_test(
-    NAME launch_host_process_test
-    PYTHON_SCRIPT
-      ${CMAKE_SOURCE_DIR}/tests/js-launch-host-process/host_process.py
-    ADDITIONAL_ARGS --js-app-bundle
-                    ${CMAKE_SOURCE_DIR}/tests/js-launch-host-process
-  )
-
   set(CONSTITUTION_ARGS
       --constitution
       ${CCF_DIR}/samples/constitutions/default/actions.js
@@ -1158,14 +1145,6 @@ if(BUILD_TESTS)
   add_e2e_test(
     NAME election_test PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/election.py
   )
-
-  if(LONG_TESTS)
-    add_e2e_test(
-      NAME acme_endorsement_test
-      PYTHON_SCRIPT ${CMAKE_SOURCE_DIR}/tests/acme_endorsement.py
-      LABEL ACME
-    )
-  endif()
 
   add_piccolo_test(
     NAME pi_ls

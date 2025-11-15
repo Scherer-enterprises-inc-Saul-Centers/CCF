@@ -233,7 +233,7 @@ namespace aft
     void initialize(
       const ccf::NodeId& self_id,
       const ccf::crypto::Pem& service_cert,
-      ccf::crypto::KeyPairPtr node_kp,
+      ccf::crypto::ECKeyPairPtr node_kp,
       const std::optional<ccf::crypto::Pem>& node_cert = std::nullopt) override
     {}
 
@@ -304,7 +304,6 @@ namespace aft
     void call(ccf::kv::ConfigurableConsensus* consensus) override
     {
       auto configuration = consensus->get_latest_configuration_unsafe();
-      std::unordered_set<ccf::NodeId> retired_nodes;
       std::list<Configuration::Nodes::const_iterator> itrs;
 
       // Remove and track retired nodes
@@ -312,7 +311,6 @@ namespace aft
       {
         if (new_configuration.find(it->first) == new_configuration.end())
         {
-          retired_nodes.emplace(it->first);
           itrs.push_back(it);
         }
       }
@@ -327,7 +325,7 @@ namespace aft
         configuration[node_id] = {};
       }
 
-      consensus->add_configuration(version, configuration, {}, retired_nodes);
+      consensus->add_configuration(version, configuration);
     }
   };
 

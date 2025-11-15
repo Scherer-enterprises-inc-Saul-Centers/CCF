@@ -14,7 +14,7 @@
 #include "ccf/service/consensus_type.h"
 #include "ccf/service/reconfiguration_type.h"
 #include "ccf/tx_id.h"
-#include "crypto/openssl/key_pair.h"
+#include "crypto/openssl/ec_key_pair.h"
 #include "kv/ledger_chunker_interface.h"
 #include "serialiser_declare.h"
 
@@ -141,6 +141,7 @@ namespace ccf::kv
     None,
     Leader,
     Follower,
+    PreVoteCandidate,
     Candidate,
   };
 
@@ -149,6 +150,7 @@ namespace ccf::kv
     {{LeadershipState::None, "None"},
      {LeadershipState::Leader, "Leader"},
      {LeadershipState::Follower, "Follower"},
+     {LeadershipState::PreVoteCandidate, "PreVoteCandidate"},
      {LeadershipState::Candidate, "Candidate"}});
 
   enum class MembershipState
@@ -220,19 +222,11 @@ namespace ccf::kv
     leadership_state,
     retirement_phase);
 
-  struct ConsensusParameters
-  {
-    ccf::ReconfigurationType reconfiguration_type;
-  };
-
   class ConfigurableConsensus
   {
   public:
     virtual void add_configuration(
-      ccf::SeqNo seqno,
-      const Configuration::Nodes& conf,
-      const std::unordered_set<NodeId>& learners = {},
-      const std::unordered_set<NodeId>& retired_nodes = {}) = 0;
+      ccf::SeqNo seqno, const Configuration::Nodes& conf) = 0;
     virtual Configuration::Nodes get_latest_configuration() = 0;
     virtual Configuration::Nodes get_latest_configuration_unsafe() const = 0;
     virtual ConsensusDetails get_details() = 0;
@@ -427,7 +421,7 @@ namespace ccf::kv
     virtual void set_endorsed_certificate(const ccf::crypto::Pem& cert) = 0;
     virtual void start_signature_emit_timer() = 0;
     virtual void set_service_signing_identity(
-      std::shared_ptr<ccf::crypto::KeyPair_OpenSSL> keypair,
+      std::shared_ptr<ccf::crypto::ECKeyPair_OpenSSL> keypair,
       const COSESignaturesConfig& cose_signatures) = 0;
     virtual const ccf::COSESignaturesConfig& get_cose_signatures_config() = 0;
   };

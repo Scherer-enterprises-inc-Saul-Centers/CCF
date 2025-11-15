@@ -95,7 +95,7 @@ namespace ccf
     ccf::crypto::CurveID curve_id;
     std::vector<ccf::crypto::SubjectAltName> subject_alt_names = {};
 
-    std::shared_ptr<ccf::crypto::KeyPair_OpenSSL> node_sign_kp;
+    std::shared_ptr<ccf::crypto::ECKeyPair_OpenSSL> node_sign_kp;
     NodeId self;
     std::shared_ptr<ccf::crypto::RSAKeyPair> node_encrypt_kp;
     ccf::crypto::Pem self_signed_node_cert;
@@ -230,7 +230,7 @@ namespace ccf
       ccf::crypto::CurveID curve_id_) :
       sm("NodeState", NodeStartupState::uninitialized),
       curve_id(curve_id_),
-      node_sign_kp(std::make_shared<ccf::crypto::KeyPair_OpenSSL>(curve_id_)),
+      node_sign_kp(std::make_shared<ccf::crypto::ECKeyPair_OpenSSL>(curve_id_)),
       self(compute_node_id_from_kp(node_sign_kp)),
       node_encrypt_kp(ccf::crypto::make_rsa_key_pair()),
       writer_factory(writer_factory),
@@ -613,11 +613,7 @@ namespace ccf
           history->set_service_signing_identity(
             network.identity->get_key_pair(), config.cose_signatures);
 
-          setup_consensus(
-            ServiceStatus::OPENING,
-            ccf::ReconfigurationType::ONE_TRANSACTION,
-            false,
-            endorsed_node_cert);
+          setup_consensus(false, endorsed_node_cert);
 
           // Become the primary and force replication
           consensus->force_become_primary();
@@ -783,12 +779,7 @@ namespace ccf
             }
             n2n_channels_cert = resp.network_info->endorsed_certificate.value();
 
-            setup_consensus(
-              resp.network_info->service_status.value_or(
-                ServiceStatus::OPENING),
-              ccf::ReconfigurationType::ONE_TRANSACTION,
-              resp.network_info->public_only,
-              n2n_channels_cert);
+            setup_consensus(resp.network_info->public_only, n2n_channels_cert);
             auto_refresh_jwt_keys();
 
             if (resp.network_info->public_only)
@@ -1189,12 +1180,7 @@ namespace ccf
         h->set_node_id(self);
       }
 
-      auto service_config = tx.ro(network.config)->get();
-
-      setup_consensus(
-        ServiceStatus::OPENING,
-        ccf::ReconfigurationType::ONE_TRANSACTION,
-        true);
+      setup_consensus(true);
       auto_refresh_jwt_keys();
 
       LOG_DEBUG_FMT("Restarting consensus at view: {} seqno: {}", view, index);
@@ -1767,6 +1753,11 @@ namespace ccf
          sm.check(NodeStartupState::partOfPublicNetwork) ||
          sm.check(NodeStartupState::readingPrivateLedger)) &&
         consensus->can_replicate());
+    }
+
+    std::optional<ccf::NodeId> get_primary() override
+    {
+      return consensus->primary();
     }
 
     bool is_in_initialised_state() const override
@@ -2429,7 +2420,7 @@ namespace ccf
             auto hook_pubk_pem = ccf::crypto::public_key_pem_from_cert(
               ccf::crypto::cert_pem_to_der(w->cert));
             auto current_pubk_pem =
-              ccf::crypto::make_key_pair(network.identity->priv_key)
+              ccf::crypto::make_ec_key_pair(network.identity->priv_key)
                 ->public_key_pem();
             if (hook_pubk_pem != current_pubk_pem)
             {
@@ -2560,8 +2551,6 @@ namespace ccf
     }
 
     void setup_consensus(
-      ServiceStatus service_status,
-      ccf::ReconfigurationType reconfiguration_type,
       bool public_only = false,
       const std::optional<ccf::crypto::Pem>& endorsed_node_certificate_ =
         std::nullopt)
@@ -2574,9 +2563,6 @@ namespace ccf
       auto node_client = std::make_shared<HTTPNodeClient>(
         rpc_map, node_sign_kp, self_signed_node_cert, endorsed_node_cert);
 
-      ccf::kv::MembershipState membership_state =
-        ccf::kv::MembershipState::Active;
-
       consensus = std::make_shared<RaftType>(
         consensus_config,
         std::make_unique<aft::Adaptor<ccf::kv::Store>>(network.tables),
@@ -2584,9 +2570,7 @@ namespace ccf
         n2n_channels,
         shared_state,
         node_client,
-        public_only,
-        membership_state,
-        reconfiguration_type);
+        public_only);
 
       network.tables->set_consensus(consensus);
       network.tables->set_snapshotter(snapshotter);

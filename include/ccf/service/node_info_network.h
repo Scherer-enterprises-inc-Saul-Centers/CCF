@@ -6,12 +6,13 @@
 #include "ccf/ds/json.h"
 #include "ccf/ds/nonstd.h"
 #include "ccf/http_configuration.h"
+#include "ccf/service/operator_feature.h"
 
 #include <string>
 
 namespace ccf
 {
-  enum class Authority
+  enum class Authority : uint8_t
   {
     NODE,
     SERVICE,
@@ -53,7 +54,7 @@ namespace ccf
 
   static constexpr auto PRIMARY_RPC_INTERFACE = "primary_rpc_interface";
 
-  enum class RedirectionResolutionKind
+  enum class RedirectionResolutionKind : uint8_t
   {
     NodeByRole,
     StaticAddress
@@ -109,6 +110,11 @@ namespace ccf
       /// Timeout for forwarded RPC calls (in milliseconds)
       std::optional<size_t> forwarding_timeout_ms = std::nullopt;
 
+      /// Features enabled for this interface. Any endpoint with required
+      /// features will be inaccessible (on this interface) if this does not
+      /// contain those features.
+      std::set<ccf::endpoints::OperatorFeature> enabled_operator_features;
+
       struct Redirections
       {
         RedirectionResolverConfig to_primary;
@@ -130,6 +136,7 @@ namespace ccf
           http_configuration == other.http_configuration &&
           accepted_endpoints == other.accepted_endpoints &&
           forwarding_timeout_ms == other.forwarding_timeout_ms &&
+          enabled_operator_features == other.enabled_operator_features &&
           redirections == other.redirections;
       }
     };
@@ -165,6 +172,7 @@ namespace ccf
     http_configuration,
     accepted_endpoints,
     forwarding_timeout_ms,
+    enabled_operator_features,
     redirections);
   DECLARE_JSON_TYPE_WITH_OPTIONAL_FIELDS(NodeInfoNetwork_v2);
   DECLARE_JSON_REQUIRED_FIELDS(
@@ -208,7 +216,7 @@ namespace ccf
       std::tie(v1.nodehost, v1.nodeport) =
         split_net_address(nin.node_to_node_interface.bind_address);
 
-      if (nin.rpc_interfaces.size() > 0)
+      if (!nin.rpc_interfaces.empty())
       {
         const auto& primary_interface = nin.rpc_interfaces.begin()->second;
         std::tie(v1.rpchost, v1.rpcport) =

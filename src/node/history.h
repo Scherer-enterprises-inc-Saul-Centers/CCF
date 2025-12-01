@@ -10,12 +10,13 @@
 #include "crypto/openssl/ec_key_pair.h"
 #include "crypto/openssl/hash.h"
 #include "ds/internal_logger.h"
-#include "ds/thread_messaging.h"
 #include "endian.h"
 #include "kv/kv_types.h"
 #include "kv/store.h"
 #include "node_signature_verify.h"
 #include "service/tables/signatures.h"
+#include "tasks/basic_task.h"
+#include "tasks/task_system.h"
 
 #include <array>
 #include <deque>
@@ -25,25 +26,6 @@
 // merklecpp traces are off by default, even when CCF tracing is enabled
 // #include "merklecpp_trace.h"
 #include <merklecpp/merklecpp.h>
-
-FMT_BEGIN_NAMESPACE
-template <>
-struct formatter<ccf::kv::TxHistory::RequestID>
-{
-  template <typename ParseContext>
-  constexpr auto parse(ParseContext& ctx)
-  {
-    return ctx.begin();
-  }
-
-  template <typename FormatContext>
-  auto format(const ccf::kv::TxHistory::RequestID& p, FormatContext& ctx) const
-  {
-    return format_to(
-      ctx.out(), "<RID {0}, {1}>", std::get<0>(p), std::get<1>(p));
-  }
-};
-FMT_END_NAMESPACE
 
 namespace ccf
 {
@@ -92,13 +74,13 @@ namespace ccf
 
   class NullTxHistoryPendingTx : public ccf::kv::PendingTx
   {
-    ccf::kv::TxID txid;
+    ccf::TxID txid;
     ccf::kv::Store& store;
     NodeId id;
 
   public:
     NullTxHistoryPendingTx(
-      ccf::kv::TxID txid_, ccf::kv::Store& store_, const NodeId& id_) :
+      ccf::TxID txid_, ccf::kv::Store& store_, const NodeId& id_) :
       txid(txid_),
       store(store_),
       id(id_)
@@ -114,7 +96,7 @@ namespace ccf
 
       auto serialised_tree = sig.template wo<ccf::SerialisedMerkleTree>(
         ccf::Tables::SERIALISED_MERKLE_TREE);
-      PrimarySignature sig_value(id, txid.version);
+      PrimarySignature sig_value(id, txid.seqno);
       signatures->put(sig_value);
       cose_signatures->put(ccf::CoseSignature{});
       serialised_tree->put({});
@@ -163,11 +145,10 @@ namespace ccf
       term_of_next_version = t;
     }
 
-    void rollback(
-      const ccf::kv::TxID& tx_id, ccf::kv::Term commit_term_) override
+    void rollback(const ccf::TxID& tx_id, ccf::kv::Term commit_term_) override
     {
-      version = tx_id.version;
-      term_of_last_version = tx_id.term;
+      version = tx_id.seqno;
+      term_of_last_version = tx_id.view;
       term_of_next_version = commit_term_;
     }
 
@@ -186,7 +167,7 @@ namespace ccf
     void emit_signature() override
     {
       auto txid = store.next_txid();
-      LOG_DEBUG_FMT("Issuing signature at {}.{}", txid.term, txid.version);
+      LOG_DEBUG_FMT("Issuing signature at {}.{}", txid.view, txid.seqno);
       store.commit(
         txid, std::make_unique<NullTxHistoryPendingTx>(txid, store, id), true);
     }
@@ -212,7 +193,7 @@ namespace ccf
       return ccf::crypto::Sha256Hash(std::to_string(version));
     }
 
-    std::tuple<ccf::kv::TxID, ccf::crypto::Sha256Hash, ccf::kv::Term>
+    std::tuple<ccf::TxID, ccf::crypto::Sha256Hash, ccf::kv::Term>
     get_replicated_state_txid_and_root() override
     {
       return {
@@ -320,7 +301,7 @@ namespace ccf
   template <class T>
   class MerkleTreeHistoryPendingTx : public ccf::kv::PendingTx
   {
-    ccf::kv::TxID txid;
+    ccf::TxID txid;
     ccf::kv::Store& store;
     ccf::kv::TxHistory& history;
     NodeId id;
@@ -331,7 +312,7 @@ namespace ccf
 
   public:
     MerkleTreeHistoryPendingTx(
-      ccf::kv::TxID txid_,
+      ccf::TxID txid_,
       ccf::kv::Store& store_,
       ccf::kv::TxHistory& history_,
       const NodeId& id_,
@@ -368,8 +349,8 @@ namespace ccf
 
       PrimarySignature sig_value(
         id,
-        txid.version,
-        txid.term,
+        txid.seqno,
+        txid.view,
         root,
         {}, // Nonce is currently empty
         primary_sig,
@@ -393,7 +374,7 @@ namespace ccf
               ccf::crypto::COSE_PHEADER_KEY_CCF),
             ccf::crypto::COSEHeadersArray{
               ccf::crypto::cose_params_string_string(
-                ccf::crypto::COSE_PHEADER_KEY_TXID, txid.str())}));
+                ccf::crypto::COSE_PHEADER_KEY_TXID, txid.to_str())}));
 
       auto cwt_headers =
         std::static_pointer_cast<ccf::crypto::COSEParametersFactory>(
@@ -427,7 +408,7 @@ namespace ccf
 
       signatures->put(sig_value);
       cose_signatures->put(cose_sign);
-      serialised_tree->put(history.serialise_tree(txid.version - 1));
+      serialised_tree->put(history.serialise_tree(txid.seqno - 1));
       return sig.commit_reserved();
     }
   };
@@ -573,8 +554,7 @@ namespace ccf
     ccf::crypto::COSEVerifierUniquePtr cose_verifier{};
     std::vector<uint8_t> cose_cert_cached{};
 
-    std::optional<::threading::TaskQueue::TimerEntry>
-      emit_signature_timer_entry = std::nullopt;
+    ccf::tasks::Task emit_signature_periodic_task;
     size_t sig_tx_interval;
     size_t sig_ms_interval;
 
@@ -645,72 +625,57 @@ namespace ccf
 
     void start_signature_emit_timer() override
     {
-      struct EmitSigMsg
-      {
-        EmitSigMsg(HashedTxHistory<T>* self_) : self(self_) {}
-        HashedTxHistory<T>* self;
-      };
+      const auto delay = std::chrono::milliseconds(sig_ms_interval);
 
-      auto emit_sig_msg = std::make_unique<::threading::Tmsg<EmitSigMsg>>(
-        [](std::unique_ptr<::threading::Tmsg<EmitSigMsg>> msg) {
-          auto self = msg->data.self;
+      emit_signature_periodic_task = ccf::tasks::make_basic_task([this]() {
+        std::unique_lock<ccf::pal::Mutex> mguard(
+          this->signature_lock, std::defer_lock);
 
-          std::unique_lock<ccf::pal::Mutex> mguard(
-            self->signature_lock, std::defer_lock);
+        bool should_emit_signature = false;
 
-          bool should_emit_signature = false;
-
-          if (mguard.try_lock())
+        if (mguard.try_lock())
+        {
+          auto consensus = this->store.get_consensus();
+          if (consensus != nullptr)
           {
-            auto consensus = self->store.get_consensus();
-            if (consensus != nullptr)
+            auto sig_disp = consensus->get_signature_disposition();
+            switch (sig_disp)
             {
-              auto sig_disp = consensus->get_signature_disposition();
-              switch (sig_disp)
+              case ccf::kv::Consensus::SignatureDisposition::CANT_REPLICATE:
               {
-                case ccf::kv::Consensus::SignatureDisposition::CANT_REPLICATE:
-                {
-                  break;
-                }
-                case ccf::kv::Consensus::SignatureDisposition::CAN_SIGN:
-                {
-                  if (self->store.committable_gap() > 0)
-                  {
-                    should_emit_signature = true;
-                  }
-                  break;
-                }
-                case ccf::kv::Consensus::SignatureDisposition::SHOULD_SIGN:
+                break;
+              }
+              case ccf::kv::Consensus::SignatureDisposition::CAN_SIGN:
+              {
+                if (this->store.committable_gap() > 0)
                 {
                   should_emit_signature = true;
-                  break;
                 }
+                break;
+              }
+              case ccf::kv::Consensus::SignatureDisposition::SHOULD_SIGN:
+              {
+                should_emit_signature = true;
+                break;
               }
             }
           }
+        }
 
-          if (should_emit_signature)
-          {
-            msg->data.self->emit_signature();
-          }
+        if (should_emit_signature)
+        {
+          this->emit_signature();
+        }
+      });
 
-          self->emit_signature_timer_entry =
-            ::threading::ThreadMessaging::instance().add_task_after(
-              std::move(msg), std::chrono::milliseconds(self->sig_ms_interval));
-        },
-        this);
-
-      emit_signature_timer_entry =
-        ::threading::ThreadMessaging::instance().add_task_after(
-          std::move(emit_sig_msg), std::chrono::milliseconds(sig_ms_interval));
+      ccf::tasks::add_periodic_task(emit_signature_periodic_task, delay, delay);
     }
 
     ~HashedTxHistory()
     {
-      if (emit_signature_timer_entry.has_value())
+      if (emit_signature_periodic_task != nullptr)
       {
-        ::threading::ThreadMessaging::instance().cancel_timer_task(
-          *emit_signature_timer_entry);
+        emit_signature_periodic_task->cancel_task();
       }
     }
 
@@ -760,7 +725,7 @@ namespace ccf
       return replicated_state_tree.get_root();
     }
 
-    std::tuple<ccf::kv::TxID, ccf::crypto::Sha256Hash, ccf::kv::Term>
+    std::tuple<ccf::TxID, ccf::crypto::Sha256Hash, ccf::kv::Term>
     get_replicated_state_txid_and_root() override
     {
       std::lock_guard<ccf::pal::Mutex> guard(state_lock);
@@ -858,13 +823,13 @@ namespace ccf
     }
 
     void rollback(
-      const ccf::kv::TxID& tx_id, ccf::kv::Term term_of_next_version_) override
+      const ccf::TxID& tx_id, ccf::kv::Term term_of_next_version_) override
     {
       std::lock_guard<ccf::pal::Mutex> guard(state_lock);
-      LOG_TRACE_FMT("Rollback to {}.{}", tx_id.term, tx_id.version);
-      term_of_last_version = tx_id.term;
+      LOG_TRACE_FMT("Rollback to {}.{}", tx_id.view, tx_id.seqno);
+      term_of_last_version = tx_id.view;
       term_of_next_version = term_of_next_version_;
-      replicated_state_tree.retract(tx_id.version);
+      replicated_state_tree.retract(tx_id.seqno);
       log_hash(replicated_state_tree.get_root(), ROLLBACK);
     }
 
@@ -914,7 +879,7 @@ namespace ccf
 
       auto txid = store.next_txid();
 
-      LOG_DEBUG_FMT("Signed at {} in view: {}", txid.version, txid.term);
+      LOG_DEBUG_FMT("Signed at {} in view: {}", txid.seqno, txid.view);
 
       if (!signing_identity.has_value())
       {

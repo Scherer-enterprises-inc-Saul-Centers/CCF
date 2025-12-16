@@ -17,13 +17,10 @@ jobs:
     steps:
       - name: "Checkout dependencies"
         shell: bash
-        run: |# docker/Dockerfile
-FROM node:20-alpine AS builder
-WORKDIR /usr/src/app
-COPY package.json package-lock.json* ./
-RUN npm ci
-COPY . .
-RUN npm run build
+        run: docker/Dockerfile
+       node: 20-alpine AS builder WORKDIR /usr/src/app
+             COPY package.json package-lock.json* ./
+        RUN: npm ci RUN npm run build
 
 FROM node:20-alpine AS runtime
 WORKDIR /usr/src/app

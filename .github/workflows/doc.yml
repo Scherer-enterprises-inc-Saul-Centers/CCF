@@ -17,7 +17,25 @@ jobs:
     steps:
       - name: "Checkout dependencies"
         shell: bash
-        run: |
+        run: |# docker/Dockerfile
+FROM node:20-alpine AS builder
+WORKDIR /usr/src/app
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine AS runtime
+WORKDIR /usr/src/app
+COPY --from=builder /usr/src/app/dist ./dist
+COPY package.json package-lock.json* ./
+RUN npm ci --only=production
+# non-root
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+ENV NODE_ENV=production PORT=3000
+EXPOSE 3000
+CMD ["node", "dist/index.js"]
           gpg --import /etc/pki/rpm-gpg/MICROSOFT-RPM-GPG-KEY
           tdnf -y update
           tdnf -y install ca-certificates git
@@ -33,7 +51,33 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Build Documentation
-        run: |
+        run: |version: '3.8'
+services:
+  bin-lookup:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: bin-lookup
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - ALLOWED_ORIGINS=http://localhost:3000
+      - MASTERCARD_BASE_URL=${MASTERCARD_BASE_URL:-https://server.manage.smartbear.com:443/bin-resources}
+      - MTLS_ENABLED=${MTLS_ENABLED:-false}
+      - MTLS_CLIENT_CERT_PATH=/run/secrets/mtls_client_cert.pem
+      - MTLS_CLIENT_KEY_PATH=/run/secrets/mtls_client_key.pem
+      - MTLS_CA_CERT_PATH=/run/secrets/mtls_ca_cert.pem
+      - TOKEN_HMAC_SECRET=${TOKEN_HMAC_SECRET:-}
+    volumes:
+      - ./:/usr/src/app:ro
+      - ${PWD}/.env:/usr/src/app/.env:ro
+      # for certs, mount ./secrets (create locally) if using MTLS
+      # - ${PWD}/secrets/mtls_client_cert.pem:/run/secrets/mtls_client_cert.pem:ro
+      # - ${PWD}/secrets/mtls_client_key.pem:/run/secrets/mtls_client_key.pem:ro
+      # - ${PWD}/secrets/mtls_ca_cert.pem:/run/secrets/mtls_ca_cert.pem:ro
           set -x
           ./scripts/setup-ci.sh
           python3 -m venv env
